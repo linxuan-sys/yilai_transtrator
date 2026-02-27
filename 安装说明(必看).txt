@@ -1,0 +1,83 @@
+*** 译来翻译器linux版 *** 
+*** 安装说明 ***
+*** 作者：轩轩 ***
+*** 开源项目，请勿运作商业用途，请遵守开源协议 ***
+
+ 一、需要安装的依赖
+
+在终端运行以下命令安装依赖：
+
+bash
+ 系统依赖（Fedora/RHEL）
+sudo dnf install python3-pip python3-pillow python3-pillow-tk xclip
+
+'''
+- python3-pip - Python 包管理器
+- python3-pillow - Python 图片处理库
+- python3-pillow-tk - Pillow 的 Tkinter 支持（图片预览用）
+- xclip - 剪贴板工具（划词翻译用）
+'''
+
+
+Python 依赖
+pip3 install pystray requests
+
+
+如果你用的是 Ubuntu/Debian：
+bash
+sudo apt install python3-pip python3-pil python3-pil.imagetk xclip
+pip3 install pystray requests
+
+
+ 二、获取有道智云 API 密钥
+
+1. 打开有道智云官网：https://ai.youdao.com
+2. 注册并登录账号
+3. 进入控制台，创建一个应用
+4. 选择服务：勾选「文本翻译」和「通用文字识别(OCR)」( 必选 )
+5. 接入方式选择「API」
+6. 创建后获得 `appKey` 和 `应用密钥`
+
+ 三、配置密钥
+
+编辑 `config.json` 文件，填入你的密钥：
+
+
+{
+    "app_key": "你的appKey(ID)",
+    "app_secret": "你的应用密钥",
+    "default_from": "auto",
+    "default_to": "zh-CHS"
+}
+
+
+ 四、运行程序
+
+进入 main.py 所在的目录后，用终端打开。或者直接在终端打开所在的目录
+bash
+python3 main.py
+
+或者右键点击 run.py，然后点击作为程序运行
+
+ 五、自定义 （可选）
+ 
+ 设置桌面快捷方式，软件菜单，应用图标，托盘图标    应用图标我给了一个默认的，这些自定义不会的可以上网上找或者问 AI 
+
+     功能说明
+
+- 文本翻译：输入文字后点击「翻译」或按 Enter
+- 图片OCR：按 Ctrl+V 粘贴截图，自动识别文字
+- 划词翻译：选中文字后，用快捷键触发翻译
+- 系统托盘：关闭窗口后最小化到托盘
+
+## 快捷键设置（可选）##
+
+在系统设置中添加自定义快捷键：
+
+- 显示窗口：`python3 /你的路径/main.py`
+- 划词翻译：`python3 /你的路径/main.py --selection-translate`
+
+
+
+
+有问题可以在我的哔哩哔哩账号下面评论

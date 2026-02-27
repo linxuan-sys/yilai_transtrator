@@ -1,0 +1,6 @@
+{
+    "app_key": "请在这里填写你的appKey",
+    "app_secret": "请在这里填写你的应用密钥",
+    "default_from": "auto",
+    "default_to": "zh-CHS"
+}
