@@ -70,18 +70,23 @@ def send_selection_translate_signal():
 
 
 def get_selected_text() -> str:
-    """获取当前选中的文本（通过 xclip）"""
-    try:
-        result = subprocess.run(
-            ['xclip', '-selection', 'primary', '-o'],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
+    """获取当前选中的文本
+
+    Wayland 会话下优先用 wl-paste 读 primary selection（X11 桥接通常拿不到
+    Wayland 应用的选区），失败再回退到 xclip。
+    """
+    for cmd in (['wl-paste', '-p', '-n'], ['xclip', '-selection', 'primary', '-o']):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
     return ""
 
 
@@ -132,7 +137,19 @@ def get_image_from_clipboard() -> bytes:
 
 class TranslatorApp:
     """翻译器主应用类"""
-    
+
+    # 配色与字体（现代深色风格）
+    COLORS = {
+        "bg": "#1e1e24",
+        "surface": "#26262e",
+        "field": "#17171c",
+        "fg": "#e4e4e7",
+        "muted": "#9aa0aa",
+        "accent": "#7aa2f7",
+        "border": "#33333c",
+    }
+    FONT_FAMILY = "Noto Sans CJK SC"
+
     # 状态文件路径
     STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
     
@@ -271,21 +288,25 @@ class TranslatorApp:
     
     def _create_window(self):
         """创建主窗口"""
-        self.root = tk.Tk()
+        # className 决定 X11 的 WM_CLASS，Wayland 下据此匹配窗口规则
+        self.root = tk.Tk(className="yilai-translator")
         
         # 创建窗口后立即初始化 BooleanVar（必须在创建 root 之后）
         self.auto_translate = tk.BooleanVar(value=False)
         self.root.title("译来翻译器")
         
         # 设置窗口大小和位置（优先使用保存的状态）
-        # 默认更大的窗口以容纳图片预览区
-        width = self.saved_state.get("window_width", self.config.get("window_width", 1100))
-        height = self.saved_state.get("window_height", self.config.get("window_height", 500))
+        # 小窗浮层：默认紧凑尺寸
+        width = self.saved_state.get("window_width", self.config.get("window_width", 660))
+        height = self.saved_state.get("window_height", self.config.get("window_height", 480))
         x = self.saved_state.get("window_x")
         y = self.saved_state.get("window_y")
         
         self.root.geometry(f"{width}x{height}")
-        self.root.minsize(900, 400)
+        self.root.minsize(540, 380)
+        
+        # 浮在其他窗口之上
+        self.root.attributes("-topmost", True)
         
         # 如果有保存的位置，使用保存的位置，否则居中
         if x is not None and y is not None:
@@ -299,18 +320,15 @@ class TranslatorApp:
         # 绑定窗口大小变化事件
         self.root.bind("<Configure>", self._on_window_configure)
         
-        # 绑定粘贴快捷键
-        self.root.bind("<Control-v>", self._paste_image)
-        self.root.bind("<Control-V>", self._paste_image)
-        
         # 设置关闭行为：最小化到托盘
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         
-        # 创建界面组件
-        self._create_widgets()
+        # Esc 关闭窗口（隐藏到托盘，不退出程序）
+        self.root.bind("<Escape>", self._on_escape)
         
-        # 设置样式
+        # 先设样式，再创建界面组件
         self._set_style()
+        self._create_widgets()
     
     def _on_window_configure(self, event):
         """窗口大小/位置变化时保存状态（延迟保存）"""
@@ -319,39 +337,45 @@ class TranslatorApp:
         self._save_state_after_id = self.root.after(500, self._save_state)
     
     def _create_widgets(self):
-        """创建界面组件 - 带OCR图片输入区域"""
-        # 配置根窗口的grid权重
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        
-        # 主框架
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky="nsew")
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(1, weight=1)
-        
-        # ===== 第0行：语言选择框架 =====
-        lang_frame = ttk.Frame(main_frame)
-        lang_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        
-        # 源语言
-        ttk.Label(lang_frame, text="源语言:").pack(side=tk.LEFT)
+        """创建界面组件 - 现代紧凑单列布局"""
+        # 本轮改成单列布局，不再使用图片预览画布（保留属性兼容旧逻辑）
+        self.image_canvas = None
+
+        c = self.COLORS
+        F = self.FONT_FAMILY
+        self.root.configure(bg=c["bg"])
+
+        root = self.root
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+
+        content = ttk.Frame(root, padding=(16, 14, 16, 10), style="App.TFrame")
+        content.grid(row=0, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(2, weight=1)   # 原文
+        content.rowconfigure(5, weight=1)   # 译文
+
+        # ===== 语言栏 =====
+        lang_bar = ttk.Frame(content, style="App.TFrame")
+        lang_bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
         self.from_lang_var = tk.StringVar(value="自动检测")
         self.from_lang_combo = ttk.Combobox(
-            lang_frame,
+            lang_bar,
             textvariable=self.from_lang_var,
             values=list(YoudaoTranslator.LANGUAGES.keys()),
             state="readonly",
-            width=10
+            width=11,
+            font=(F, 10),
         )
-        self.from_lang_combo.pack(side=tk.LEFT, padx=(5, 15))
-        
-        # 交换按钮
-        self.swap_btn = ttk.Button(lang_frame, text="⇄ 交换", width=8, command=self._swap_languages)
-        self.swap_btn.pack(side=tk.LEFT, padx=5)
-        
-        # 目标语言
-        ttk.Label(lang_frame, text="目标语言:").pack(side=tk.LEFT, padx=(15, 0))
+        self.from_lang_combo.pack(side=tk.LEFT)
+
+        self.swap_btn = ttk.Button(
+            lang_bar, text="⇄", width=3,
+            command=self._swap_languages, style="Icon.TButton"
+        )
+        self.swap_btn.pack(side=tk.LEFT, padx=6)
+
         default_to = self.config.get("default_to", "zh-CHS")
         default_to_name = "中文简体"
         for name, code in YoudaoTranslator.LANGUAGES.items():
@@ -360,141 +384,184 @@ class TranslatorApp:
                 break
         self.to_lang_var = tk.StringVar(value=default_to_name)
         self.to_lang_combo = ttk.Combobox(
-            lang_frame,
+            lang_bar,
             textvariable=self.to_lang_var,
             values=list(YoudaoTranslator.LANGUAGES.keys()),
             state="readonly",
-            width=10
+            width=11,
+            font=(F, 10),
         )
-        self.to_lang_combo.pack(side=tk.LEFT, padx=5)
-        
-        # 状态标签
-        self.status_var = tk.StringVar(value="就绪 - Ctrl+V 粘贴图片自动OCR识别")
-        self.status_label = ttk.Label(lang_frame, textvariable=self.status_var)
-        self.status_label.pack(side=tk.RIGHT)
-        
-        # 动态翻译复选框
+        self.to_lang_combo.pack(side=tk.LEFT)
+
         self.auto_translate_check = ttk.Checkbutton(
-            lang_frame,
-            text="动态翻译",
+            lang_bar, text="动态翻译",
             variable=self.auto_translate,
-            command=self._on_auto_translate_toggle
+            command=self._on_auto_translate_toggle,
+            style="Toolbutton",
         )
-        self.auto_translate_check.pack(side=tk.RIGHT, padx=(0, 15))
-        
-        # ===== 第1行：OCR图片区 + 文本区 =====
-        content_frame = ttk.Frame(main_frame)
-        content_frame.grid(row=1, column=0, sticky="nsew")
-        content_frame.columnconfigure(0, weight=0, minsize=200)   # 图片区固定最小宽度200
-        content_frame.columnconfigure(1, weight=0)   # 按钮区固定宽度
-        content_frame.columnconfigure(2, weight=1)   # 输入区可扩展
-        content_frame.columnconfigure(3, weight=0)   # 按钮区固定宽度
-        content_frame.columnconfigure(4, weight=1)   # 结果区可扩展
-        content_frame.rowconfigure(0, weight=1)
-        
-        # --- 左侧：图片区 ---
-        image_frame = ttk.LabelFrame(content_frame, text="图片预览 (Ctrl+V)", padding="3")
-        image_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        image_frame.columnconfigure(0, weight=1)
-        image_frame.rowconfigure(0, weight=1)
-        image_frame.rowconfigure(1, weight=0)  # 按钮行不扩展
-        image_frame.rowconfigure(2, weight=0)  # 语言行不扩展
-        
-        # 图片预览区 - 使用Canvas实现真正的填充
-        self.image_canvas = tk.Canvas(image_frame, bg='#f0f0f0', highlightthickness=0)
-        self.image_canvas.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
-        
-        # 绑定Canvas大小变化事件来更新图片显示
-        self.image_canvas.bind("<Configure>", self._on_image_canvas_resize)
-        
-        # 图片操作按钮
-        img_btn_frame = ttk.Frame(image_frame)
-        img_btn_frame.grid(row=1, column=0, sticky="ew", pady=(3, 0))
-        
-        ttk.Button(img_btn_frame, text="粘贴图片", command=self._paste_image, width=9).pack(side=tk.LEFT, padx=1)
-        ttk.Button(img_btn_frame, text="选择文件", command=self._select_image_file, width=9).pack(side=tk.LEFT, padx=1)
-        
-        # OCR语言选择
-        ocr_lang_frame = ttk.Frame(image_frame)
-        ocr_lang_frame.grid(row=2, column=0, sticky="ew", pady=(3, 0))
-        ttk.Label(ocr_lang_frame, text="语言:").pack(side=tk.LEFT)
+        self.auto_translate_check.pack(side=tk.RIGHT)
+
+        # ===== 原文 =====
+        ttk.Label(content, text="原文", style="Caption.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(0, 4)
+        )
+
+        self.input_text = self._make_text_area(content, row=2, readonly=False)
+
+        self.input_hint = tk.Label(
+            self.input_text.master,
+            text="在这里输入或粘贴文字，回车翻译",
+            bg=self.COLORS["field"], fg=self.COLORS["muted"],
+            font=(F, 10), anchor="nw",
+        )
+        self.input_hint.bind("<Button-1>", lambda e: self.input_text.focus_set())
+
+        # ===== 工具条 =====
+        toolbar = ttk.Frame(content, style="App.TFrame")
+        toolbar.grid(row=3, column=0, sticky="ew", pady=10)
+
+        self.translate_btn = ttk.Button(
+            toolbar, text="翻译", width=9,
+            command=self._translate, style="Accent.TButton"
+        )
+        self.translate_btn.pack(side=tk.LEFT)
+        self.paste_btn = ttk.Button(
+            toolbar, text="粘贴文本", width=9, command=self._paste_text
+        )
+        self.paste_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.ocr_btn = ttk.Button(
+            toolbar, text="图片 OCR", width=9, command=self._paste_image
+        )
+        self.ocr_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.clear_btn = ttk.Button(
+            toolbar, text="清空", width=6, command=self._clear
+        )
+        self.clear_btn.pack(side=tk.LEFT, padx=(8, 0))
+
         self.ocr_lang_var = tk.StringVar(value="自动识别")
         self.ocr_lang_combo = ttk.Combobox(
-            ocr_lang_frame,
+            toolbar,
             textvariable=self.ocr_lang_var,
             values=list(YoudaoOCR.OCR_LANGUAGES.keys()),
             state="readonly",
-            width=8
+            width=8,
+            font=(F, 9),
         )
-        self.ocr_lang_combo.pack(side=tk.LEFT, padx=2)
-        
-        # --- 输入文本区 ---
-        input_frame = ttk.LabelFrame(content_frame, text="输入文本", padding="5")
-        input_frame.grid(row=0, column=2, sticky="nsew", padx=(5, 5))
-        input_frame.columnconfigure(0, weight=1)
-        input_frame.rowconfigure(0, weight=1)
-        
-        self.input_text = tk.Text(
-            input_frame,
-            wrap=tk.WORD,
-            font=("Noto Sans CJK SC", 11),
-            relief=tk.SOLID,
-            borderwidth=1
+        self.ocr_lang_combo.pack(side=tk.RIGHT)
+        ttk.Label(toolbar, text="OCR 语言", style="Caption.TLabel").pack(
+            side=tk.RIGHT, padx=(0, 6)
         )
-        self.input_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        input_scroll = ttk.Scrollbar(input_frame, orient=tk.VERTICAL, command=self.input_text.yview)
-        input_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.input_text.config(yscrollcommand=input_scroll.set)
-        
-        # --- 中间：按钮区 ---
-        btn_frame = ttk.Frame(content_frame)
-        btn_frame.grid(row=0, column=1, sticky="ns", padx=5)
-        
-        # 让按钮居中
-        btn_frame.columnconfigure(0, weight=1)
-        
-        self.translate_btn = ttk.Button(btn_frame, text="翻译 →", command=self._translate, width=10)
-        self.translate_btn.grid(row=0, column=0, pady=(30, 10))
-        
-        self.paste_btn = ttk.Button(btn_frame, text="粘贴文本", command=self._paste_text, width=10)
-        self.paste_btn.grid(row=1, column=0, pady=10)
-        
-        self.clear_btn = ttk.Button(btn_frame, text="清空", command=self._clear, width=10)
-        self.clear_btn.grid(row=2, column=0, pady=10)
-        
-        self.copy_btn = ttk.Button(btn_frame, text="复制结果", command=self._copy_result, width=10)
-        self.copy_btn.grid(row=3, column=0, pady=10)
-        
-        # --- 右侧：结果区 ---
-        output_frame = ttk.LabelFrame(content_frame, text="翻译结果", padding="5")
-        output_frame.grid(row=0, column=4, sticky="nsew", padx=(5, 0))
-        output_frame.columnconfigure(0, weight=1)
-        output_frame.rowconfigure(0, weight=1)
-        
-        self.output_text = tk.Text(
-            output_frame,
-            wrap=tk.WORD,
-            font=("Noto Sans CJK SC", 11),
-            relief=tk.SOLID,
-            borderwidth=1,
-            state=tk.DISABLED
+
+        # ===== 译文 =====
+        ttk.Label(content, text="译文", style="Caption.TLabel").grid(
+            row=4, column=0, sticky="w", pady=(0, 4)
         )
-        self.output_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        output_scroll = ttk.Scrollbar(output_frame, orient=tk.VERTICAL, command=self.output_text.yview)
-        output_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.output_text.config(yscrollcommand=output_scroll.set)
-        
-        # 绑定快捷键 - Enter 直接翻译
+
+        self.output_text = self._make_text_area(content, row=5, readonly=True)
+
+        self.output_hint = tk.Label(
+            self.output_text.master,
+            text="译文会显示在这里",
+            bg=self.COLORS["field"], fg=self.COLORS["muted"],
+            font=(F, 10), anchor="nw",
+        )
+
+        # ===== 状态栏 =====
+        status_bar = ttk.Frame(content, style="App.TFrame")
+        status_bar.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+
+        self.status_var = tk.StringVar(value="选中文字后按 Ctrl+\\ 划词翻译，Esc 收起")
+        self.status_label = ttk.Label(
+            status_bar, textvariable=self.status_var, style="Muted.TLabel"
+        )
+        self.status_label.pack(side=tk.LEFT)
+
+        self.copy_btn = ttk.Button(
+            status_bar, text="复制译文", width=9, command=self._copy_result
+        )
+        self.copy_btn.pack(side=tk.RIGHT)
+
+        # ===== 快捷键 =====
         self.input_text.bind("<Return>", self._on_enter_press)
-        # Shift+Enter 换行
         self.input_text.bind("<Shift-Return>", self._on_shift_enter_press)
-        # Shift+Backspace 清空
         self.input_text.bind("<Shift-BackSpace>", self._on_shift_backspace)
-        # 输入变化时触发动态翻译
         self.input_text.bind("<KeyRelease>", self._on_text_change)
-    
+        self.input_text.bind("<KeyRelease>", self._update_hints, add="+")
+        # Ctrl+V：剪贴板有图片就 OCR，否则粘贴文本
+        self.input_text.bind("<Control-v>", self._smart_paste)
+        self.input_text.bind("<Control-V>", self._smart_paste)
+
+        self._update_hints()
+
+    def _make_text_area(self, parent, row: int, readonly: bool = False, height: int = 6) -> tk.Text:
+        """创建一个带 1px 边框和滚动条的文本区"""
+        c = self.COLORS
+        F = self.FONT_FAMILY
+        wrap = tk.Frame(
+            parent, bg=c["field"],
+            highlightthickness=1,
+            highlightbackground=c["border"],
+            highlightcolor=c["accent"],
+        )
+        wrap.grid(row=row, column=0, sticky="nsew")
+
+        text = tk.Text(
+            wrap,
+            wrap=tk.WORD,
+            font=(F, 11),
+            height=height,
+            bg=c["field"],
+            fg=c["fg"],
+            insertbackground=c["accent"],
+            selectbackground=c["accent"],
+            selectforeground="#101014",
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=0,
+            padx=10,
+            pady=8,
+            undo=not readonly,
+        )
+        scrollbar = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        if readonly:
+            text.configure(state=tk.DISABLED)
+
+        # 聚焦时边框变强调色
+        text.bind("<FocusIn>", lambda e: wrap.configure(highlightbackground=c["accent"]))
+        text.bind("<FocusOut>", lambda e: wrap.configure(highlightbackground=c["border"]))
+        return text
+
+    def _update_hints(self, event=None):
+        """空白时显示占位提示"""
+        for text_widget, hint in (
+            (getattr(self, "input_text", None), getattr(self, "input_hint", None)),
+            (getattr(self, "output_text", None), getattr(self, "output_hint", None)),
+        ):
+            if text_widget is None or hint is None:
+                continue
+            try:
+                empty = not text_widget.get("1.0", "end-1c").strip()
+            except Exception:
+                empty = False
+            if empty:
+                hint.place(x=12, y=10)
+            else:
+                hint.place_forget()
+
+    def _smart_paste(self, event=None):
+        """Ctrl+V：剪贴板有图就 OCR，否则当文本粘贴"""
+        image_data = get_image_from_clipboard()
+        if image_data:
+            self._set_image(image_data)
+            self.root.after(100, self._do_ocr)
+        else:
+            self._paste_text()
+        return "break"
+
     def _paste_image(self, event=None):
         """从剪贴板粘贴图片并自动OCR识别"""
         image_data = get_image_from_clipboard()
@@ -527,7 +594,9 @@ class TranslatorApp:
                 self.status_var.set(f"加载图片失败: {str(e)}")
     
     def _on_image_canvas_resize(self, event):
-        """图片Canvas大小变化时重新显示图片"""
+        """图片Canvas大小变化时重新显示图片（当前布局无画布，保留兼容）"""
+        if self.image_canvas is None:
+            return
         if self._current_image_data and IMAGETK_AVAILABLE:
             self._display_image_on_canvas()
     
@@ -536,33 +605,17 @@ class TranslatorApp:
         self._current_image_data = image_data
         
         try:
-            if IMAGETK_AVAILABLE:
-                # 保存原始PIL图片用于缩放
-                self._pil_image = Image.open(io.BytesIO(image_data))
-                self._display_image_on_canvas()
-            else:
-                # 显示提示文字
-                self.image_canvas.delete("all")
-                self.image_canvas.create_text(
-                    self.image_canvas.winfo_width() // 2,
-                    self.image_canvas.winfo_height() // 2,
-                    text="图片已加载\n(安装 python3-pillow-tk\n可显示预览)",
-                    justify="center",
-                    fill="gray"
-                )
-        except Exception as e:
-            self.image_canvas.delete("all")
-            self.image_canvas.create_text(
-                100, 100,
-                text=f"图片加载失败:\n{str(e)}",
-                justify="center",
-                fill="red"
-            )
+            # 保存原始PIL图片（单列布局下不再显示预览）
+            self._pil_image = Image.open(io.BytesIO(image_data))
+        except Exception:
             self._current_image = None
             self._pil_image = None
+            self.status_var.set("图片加载失败")
     
     def _display_image_on_canvas(self):
-        """在Canvas上显示图片（自适应大小）"""
+        """在Canvas上显示图片（自适应大小；当前布局无画布则跳过）"""
+        if self.image_canvas is None:
+            return
         if not hasattr(self, '_pil_image') or self._pil_image is None:
             return
         
@@ -620,6 +673,7 @@ class TranslatorApp:
             # 将识别结果填入输入框
             self.input_text.delete("1.0", tk.END)
             self.input_text.insert(tk.END, result["text"])
+            self._update_hints()
             self.status_var.set(f"OCR识别完成，识别到 {len(result['text'])} 个字符")
         else:
             self.status_var.set(f"OCR识别失败: {result['error']}")
@@ -670,23 +724,90 @@ class TranslatorApp:
             self._translate()
     
     def _set_style(self):
-        """设置界面样式"""
+        """深色现代风格（clam 主题）"""
+        c = self.COLORS
+        F = self.FONT_FAMILY
         style = ttk.Style()
-        style.theme_use('clam')
-        
-        # 配置按钮样式
+        style.theme_use("clam")
+
+        style.configure(".", background=c["bg"], foreground=c["fg"], font=(F, 10))
+        style.configure("App.TFrame", background=c["bg"])
+        style.configure("TLabel", background=c["bg"], foreground=c["fg"], font=(F, 10))
+        style.configure("Caption.TLabel", background=c["bg"], foreground=c["muted"], font=(F, 9))
+        style.configure("Muted.TLabel", background=c["bg"], foreground=c["muted"], font=(F, 9))
+
         style.configure(
+            "TButton", padding=(10, 5), background=c["surface"], foreground=c["fg"],
+            borderwidth=0, relief="flat", font=(F, 10),
+        )
+        style.map(
             "TButton",
-            padding=5,
-            font=("Microsoft YaHei", 10)
+            background=[("pressed", c["border"]), ("active", c["border"]), ("disabled", "#20202a")],
+            foreground=[("disabled", c["muted"])],
         )
-        
-        # 配置标签样式
+
         style.configure(
-            "TLabel",
-            font=("Microsoft YaHei", 10)
+            "Accent.TButton", background=c["accent"], foreground="#101014",
+            font=(F, 10, "bold"), padding=(10, 5), borderwidth=0,
         )
-    
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#9ab8ff"), ("pressed", "#9ab8ff"), ("disabled", "#3a3a44")],
+            foreground=[("disabled", c["muted"])],
+        )
+
+        style.configure("Icon.TButton", padding=(6, 5), font=(F, 12))
+
+        style.configure(
+            "App.TCheckbutton", background=c["bg"], foreground=c["muted"], font=(F, 9),
+            indicatorbackground=c["field"], indicatorforeground=c["accent"],
+            upperbordercolor=c["border"], lowerbordercolor=c["border"],
+        )
+        style.map(
+            "App.TCheckbutton",
+            background=[("active", c["bg"])],
+            foreground=[("selected", c["fg"])],
+        )
+
+        style.configure(
+            "TCombobox", padding=4, fieldbackground=c["field"], background=c["surface"],
+            foreground=c["fg"], bordercolor=c["border"], arrowcolor=c["muted"],
+            lightcolor=c["field"], darkcolor=c["field"], font=(F, 10),
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", c["field"])],
+            foreground=[("readonly", c["fg"])],
+            selectbackground=[("readonly", c["field"])],
+            selectforeground=[("readonly", c["fg"])],
+        )
+
+        style.configure(
+            "Vertical.TScrollbar", background="#4b4b58", troughcolor=c["bg"],
+            bordercolor=c["bg"], arrowcolor=c["muted"], relief="flat",
+            lightcolor="#4b4b58", darkcolor="#4b4b58", width=7, arrowsize=0,
+        )
+        style.configure(
+            "Toolbutton", padding=(10, 4), background=c["surface"],
+            foreground=c["muted"], font=(F, 9), borderwidth=0, relief="flat",
+        )
+        style.map(
+            "Toolbutton",
+            background=[("selected", c["accent"]), ("active", c["border"])],
+            foreground=[("selected", "#101014"), ("active", c["fg"])],
+        )
+        style.layout("Vertical.TScrollbar", [
+            ("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+                ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"}),
+            ]}),
+        ])
+
+        # 下拉列表配色
+        self.root.option_add("*TCombobox*Listbox.background", c["surface"])
+        self.root.option_add("*TCombobox*Listbox.foreground", c["fg"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", c["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#101014")
+
     def _swap_languages(self):
         """交换源语言和目标语言"""
         from_lang = self.from_lang_var.get()
@@ -747,6 +868,7 @@ class TranslatorApp:
             self.output_text.update_idletasks()
             # 重新设置为只读
             self.output_text.config(state=tk.DISABLED)
+            self._update_hints()
             self.status_var.set("翻译完成 ✓")
         else:
             self.status_var.set(f"错误: {result['error']}")
@@ -759,18 +881,12 @@ class TranslatorApp:
         self.output_text.delete("1.0", tk.END)
         self.output_text.config(state=tk.DISABLED)
         
-        # 清空图片Canvas
+        # 清空图片状态
         self._current_image = None
         self._current_image_data = None
         self._pil_image = None
-        self.image_canvas.delete("all")
-        self.image_canvas.create_text(
-            100, 80,
-            text="Ctrl+V 粘贴图片\n或点击下方按钮",
-            justify="center",
-            fill="gray"
-        )
         
+        self._update_hints()
         self.status_var.set("已清空")
     
     def _paste_text(self):
@@ -779,6 +895,7 @@ class TranslatorApp:
             clipboard_text = self.root.clipboard_get()
             self.input_text.delete("1.0", tk.END)
             self.input_text.insert(tk.END, clipboard_text)
+            self._update_hints()
             self.status_var.set("已粘贴")
             # 如果开启了动态翻译，会自动触发翻译
         except tk.TclError:
@@ -802,6 +919,7 @@ class TranslatorApp:
         # 粘贴到输入框
         self.input_text.delete("1.0", tk.END)
         self.input_text.insert(tk.END, selected_text)
+        self._update_hints()
         self.status_var.set("已获取选中文本")
         
         # 自动翻译
@@ -843,6 +961,11 @@ class TranslatorApp:
         else:
             self.root.quit()
     
+    def _on_escape(self, event=None):
+        """Esc：隐藏窗口回到后台（托盘）"""
+        self._on_close()
+        return "break"
+    
     def _show_window(self):
         """显示窗口（线程安全）"""
         # 使用 after 确保在主线程中执行
@@ -856,6 +979,10 @@ class TranslatorApp:
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        try:
+            self.input_text.focus_set()
+        except Exception:
+            pass
         self.is_visible = True
     
     def _hide_window(self):
